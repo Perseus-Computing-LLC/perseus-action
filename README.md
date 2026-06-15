@@ -1,48 +1,16 @@
-# Perseus — GitHub Action
+# perseus-action
 
-Pre-resolve workspace state on every push. Every developer who clones gets live context without installing Perseus locally.
+GitHub Action that runs [Perseus](https://github.com/tcconnally/perseus) to pre-render workspace context before AI assistants start work.
 
 ## Usage
 
-Add to `.github/workflows/perseus.yml`:
-
 ```yaml
-name: Perseus Context
-on:
-  push:
-    paths: ['.perseus/**']
-  schedule:
-    - cron: '0 */6 * * *'  # every 6 hours
-
-jobs:
-  render:
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/checkout@v4
-      - uses: tcconnally/perseus-action@v1
-        with:
-          context_file: '.perseus/context.md'
-          output_file: 'CLAUDE.md'
+- uses: tcconnally/perseus-action@main
+  with:
+    source: '.perseus/context.md'
+    output: 'AGENTS.md'
 ```
 
-## Inputs
+## What it does
 
-| Input | Default | Description |
-|---|---|---|
-| `context_file` | `.perseus/context.md` | Perseus context source |
-| `output_file` | `CLAUDE.md` | Rendered output (CLAUDE.md, AGENTS.md, .cursorrules, .hermes.md) |
-| `commit` | `true` | Commit rendered context back to repo |
-| `commit_message` | `chore: update Perseus context [skip ci]` | Commit message |
-
-## What happens
-
-1. On push to `.perseus/**` or on schedule: Perseus renders live context
-2. Rendered markdown is committed back to the repo
-3. Every developer who clones the repo gets pre-resolved context
-4. Their AI assistant reads the file on session start — zero discovery calls
-
-## License
-
-MIT — see [Perseus](https://github.com/tcconnally/perseus).
+Perseus resolves `@directives` in your context.md (services health, git state, memory search, skills listing) into a ready-to-consume markdown file that AI assistants read at session start. This action runs it in CI so context is always fresh.
