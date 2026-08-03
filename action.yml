@@ -36,8 +36,34 @@ runs:
     - name: Render context
       shell: bash
       env:
-        PERSEUS_ALLOW_DANGEROUS: ${{ inputs.allow_dangerous }}
-      run: perseus render "${{ inputs.source }}" --output "${{ inputs.output }}" --workspace "${{ inputs.workspace }}"
+        SOURCE_PATH: ${{ inputs.source }}
+        OUTPUT_PATH: ${{ inputs.output }}
+        WORKSPACE_PATH: ${{ inputs.workspace }}
+        ALLOW_DANGEROUS_INPUT: ${{ inputs.allow_dangerous }}
+      run: |
+        set -euo pipefail
+        case "${ALLOW_DANGEROUS_INPUT,,}" in
+          true) export PERSEUS_ALLOW_DANGEROUS=1 ;;
+          false) unset PERSEUS_ALLOW_DANGEROUS ;;
+          *) echo "allow_dangerous must be exactly true or false" >&2; exit 2 ;;
+        esac
+        python - "$WORKSPACE_PATH" "$SOURCE_PATH" "$OUTPUT_PATH" <<'PY'
+        from pathlib import Path
+        import sys
+
+        workspace = Path(sys.argv[1]).resolve()
+        if not workspace.is_dir():
+            raise SystemExit("workspace must be an existing directory")
+        for value in sys.argv[2:]:
+            candidate = Path(value)
+            resolved = (candidate if candidate.is_absolute() else workspace / candidate).resolve()
+            try:
+                resolved.relative_to(workspace)
+            except ValueError as exc:
+                raise SystemExit("source and output must stay inside workspace") from exc
+        PY
+        cd -- "$WORKSPACE_PATH"
+        perseus render "$SOURCE_PATH" --output "$OUTPUT_PATH" --strict
     - name: Write render provenance
       shell: bash
       env:
@@ -46,8 +72,9 @@ runs:
         WORKSPACE_PATH: ${{ inputs.workspace }}
         PROVENANCE_PATH: ${{ inputs.provenance }}
         PERSEUS_CTX_VERSION: ${{ inputs.perseus_ctx_version }}
-        PERSEUS_ALLOW_DANGEROUS: ${{ inputs.allow_dangerous }}
+        ALLOW_DANGEROUS_INPUT: ${{ inputs.allow_dangerous }}
       run: |
+        set -euo pipefail
         python - <<'PY'
         import hashlib
         import json
@@ -57,16 +84,37 @@ runs:
         from pathlib import Path
 
         workspace = Path(os.environ["WORKSPACE_PATH"]).resolve()
+        allow_dangerous = os.environ["ALLOW_DANGEROUS_INPUT"].strip().lower()
+        if allow_dangerous not in {"true", "false"}:
+            raise SystemExit("allow_dangerous must be exactly true or false")
 
         def resolve(value: str) -> Path:
             candidate = Path(value)
-            return candidate if candidate.is_absolute() else workspace / candidate
+            resolved = (candidate if candidate.is_absolute() else workspace / candidate).resolve()
+            try:
+                resolved.relative_to(workspace)
+            except ValueError as exc:
+                raise SystemExit("source, output, and provenance must stay inside workspace") from exc
+            return resolved
 
         def digest(path: Path) -> str:
             h = hashlib.sha256()
             with path.open("rb") as stream:
                 for chunk in iter(lambda: stream.read(1024 * 1024), b""):
                     h.update(chunk)
+            return h.hexdigest()
+
+        def workspace_digest(root: Path, excluded: set[Path]) -> str:
+            h = hashlib.sha256()
+            for path in sorted(root.rglob("*")):
+                if path.is_dir() or path.is_symlink() or path in excluded:
+                    continue
+                if ".git" in path.relative_to(root).parts:
+                    continue
+                relative = path.relative_to(root).as_posix().encode("utf-8")
+                h.update(len(relative).to_bytes(8, "big"))
+                h.update(relative)
+                h.update(digest(path).encode("ascii"))
             return h.hexdigest()
 
         source = resolve(os.environ["SOURCE_PATH"])
@@ -87,10 +135,12 @@ runs:
             "action_ref": os.environ.get("GITHUB_ACTION_REF") or None,
             "action_sha": action_sha,
             "perseus_ctx_version": os.environ["PERSEUS_CTX_VERSION"],
-            "dangerous_enabled": os.environ["PERSEUS_ALLOW_DANGEROUS"].lower() == "true",
+            "dangerous_enabled": allow_dangerous == "true",
             "workspace_revision": workspace_revision,
             "source_sha256": digest(source),
             "render_sha256": digest(output),
+            "workspace_sha256": workspace_digest(workspace, {output, provenance}),
+            "render_mode": "strict",
             "status": "complete",
             "created_at": datetime.now(timezone.utc).isoformat(),
         }
