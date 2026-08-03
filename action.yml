@@ -13,14 +13,87 @@ inputs:
     description: 'Workspace root directory'
     required: false
     default: '.'
+  allow_dangerous:
+    description: 'Opt in to Perseus directives that require dangerous capabilities; safe default is false'
+    required: false
+    default: 'false'
+  perseus_ctx_version:
+    description: 'Exact perseus-ctx version to install'
+    required: false
+    default: '1.0.10'
+  provenance:
+    description: 'Path for the hash-only render provenance manifest'
+    required: false
+    default: 'AGENTS.md.provenance.json'
 runs:
   using: 'composite'
   steps:
     - name: Install perseus-ctx
       shell: bash
-      run: pip install perseus-ctx
+      env:
+        PERSEUS_CTX_VERSION: ${{ inputs.perseus_ctx_version }}
+      run: python -m pip install --disable-pip-version-check "perseus-ctx==${PERSEUS_CTX_VERSION}"
     - name: Render context
       shell: bash
       env:
-        PERSEUS_ALLOW_DANGEROUS: '1'
+        PERSEUS_ALLOW_DANGEROUS: ${{ inputs.allow_dangerous }}
       run: perseus render "${{ inputs.source }}" --output "${{ inputs.output }}" --workspace "${{ inputs.workspace }}"
+    - name: Write render provenance
+      shell: bash
+      env:
+        SOURCE_PATH: ${{ inputs.source }}
+        OUTPUT_PATH: ${{ inputs.output }}
+        WORKSPACE_PATH: ${{ inputs.workspace }}
+        PROVENANCE_PATH: ${{ inputs.provenance }}
+        PERSEUS_CTX_VERSION: ${{ inputs.perseus_ctx_version }}
+        PERSEUS_ALLOW_DANGEROUS: ${{ inputs.allow_dangerous }}
+      run: |
+        python - <<'PY'
+        import hashlib
+        import json
+        import os
+        import subprocess
+        from datetime import datetime, timezone
+        from pathlib import Path
+
+        workspace = Path(os.environ["WORKSPACE_PATH"]).resolve()
+
+        def resolve(value: str) -> Path:
+            candidate = Path(value)
+            return candidate if candidate.is_absolute() else workspace / candidate
+
+        def digest(path: Path) -> str:
+            h = hashlib.sha256()
+            with path.open("rb") as stream:
+                for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                    h.update(chunk)
+            return h.hexdigest()
+
+        source = resolve(os.environ["SOURCE_PATH"])
+        output = resolve(os.environ["OUTPUT_PATH"])
+        provenance = resolve(os.environ["PROVENANCE_PATH"])
+        try:
+            action_sha = os.environ.get("GITHUB_ACTION_SHA") or None
+            workspace_revision = subprocess.check_output(
+                ["git", "rev-parse", "HEAD"], cwd=workspace, text=True
+            ).strip()
+        except (OSError, subprocess.CalledProcessError):
+            action_sha = os.environ.get("GITHUB_ACTION_SHA") or None
+            workspace_revision = None
+
+        payload = {
+            "schema_version": "perseus-action-provenance/v1",
+            "action": "Perseus-Computing-LLC/perseus-action",
+            "action_ref": os.environ.get("GITHUB_ACTION_REF") or None,
+            "action_sha": action_sha,
+            "perseus_ctx_version": os.environ["PERSEUS_CTX_VERSION"],
+            "dangerous_enabled": os.environ["PERSEUS_ALLOW_DANGEROUS"].lower() == "true",
+            "workspace_revision": workspace_revision,
+            "source_sha256": digest(source),
+            "render_sha256": digest(output),
+            "status": "complete",
+            "created_at": datetime.now(timezone.utc).isoformat(),
+        }
+        provenance.parent.mkdir(parents=True, exist_ok=True)
+        provenance.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        PY
